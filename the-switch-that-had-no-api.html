@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The switch that had no API</title>
+<style>
+  :root{
+    --bg:#eef1f4; --surface:#ffffff; --border:#d7dee5;
+    --text:#141c24; --muted:#586674; --faint:#7d8996;
+    --accent:#0b8b95; --accent-2:#0a6f78; --accent-soft:#dcefef;
+    --amber:#a4680f; --amber-soft:#f4e7cf;
+    --rule:#e2e7ec;
+    /* terminal sub-world — dark in both themes */
+    --code-bg:#0b1016; --code-fg:#c9d3de; --code-dim:#6c7b8a;
+    --code-prompt:#4fd3db; --code-ok:#7fd394; --code-warn:#e6b45a; --code-str:#e0c184;
+    --shadow:0 1px 2px rgba(20,28,36,.06), 0 12px 32px -12px rgba(20,28,36,.18);
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","SFMono-Regular","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0a0e13; --surface:#111820; --border:#212b36;
+      --text:#d8e0e8; --muted:#8b99a7; --faint:#6c7a88;
+      --accent:#3fd0d8; --accent-2:#5fe0e6; --accent-soft:#0f2b2e;
+      --amber:#e6ab54; --amber-soft:#2a2113;
+      --rule:#1b242e;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f4; --surface:#ffffff; --border:#d7dee5;
+    --text:#141c24; --muted:#586674; --faint:#7d8996;
+    --accent:#0b8b95; --accent-2:#0a6f78; --accent-soft:#dcefef;
+    --amber:#a4680f; --amber-soft:#f4e7cf; --rule:#e2e7ec;
+    --shadow:0 1px 2px rgba(20,28,36,.06), 0 12px 32px -12px rgba(20,28,36,.18);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0a0e13; --surface:#111820; --border:#212b36;
+    --text:#d8e0e8; --muted:#8b99a7; --faint:#6c7a88;
+    --accent:#3fd0d8; --accent-2:#5fe0e6; --accent-soft:#0f2b2e;
+    --amber:#e6ab54; --amber-soft:#2a2113; --rule:#1b242e;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); font-size:18px; line-height:1.7;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  img{max-width:100%}
+
+  /* scroll-progress signal line */
+  #progress{position:fixed; top:0; left:0; height:2px; width:0;
+    background:linear-gradient(90deg,var(--accent),var(--accent-2));
+    z-index:50; transition:width .08s linear}
+
+  .wrap{max-width:44rem; margin:0 auto; padding:0 1.4rem}
+
+  /* ---------- hero ---------- */
+  header.hero{padding:5.5rem 0 2.4rem; border-bottom:1px solid var(--rule)}
+  .eyebrow{font-family:var(--mono); font-size:.72rem; letter-spacing:.22em;
+    text-transform:uppercase; color:var(--accent); font-weight:600}
+  h1{font-size:clamp(2.3rem,6.4vw,3.5rem); line-height:1.04; letter-spacing:-.02em;
+    font-weight:800; margin:1.1rem 0 0; text-wrap:balance}
+  .dek{font-size:1.19rem; color:var(--muted); margin:1.2rem 0 0; max-width:34rem;
+    text-wrap:pretty}
+  .meta{font-family:var(--mono); font-size:.78rem; color:var(--faint);
+    margin-top:1.8rem; display:flex; flex-wrap:wrap; gap:.5rem 1rem; align-items:center}
+  .meta b{color:var(--muted); font-weight:600}
+  .meta .dot{width:3px; height:3px; border-radius:50%; background:var(--faint); opacity:.6}
+
+  /* ---------- article ---------- */
+  article{padding:1rem 0 2rem}
+  section{padding:2.6rem 0; border-bottom:1px solid var(--rule)}
+  section:last-of-type{border-bottom:0}
+  .sec-eyebrow{font-family:var(--mono); font-size:.74rem; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--faint); font-weight:600;
+    display:flex; align-items:center; gap:.7rem; margin-bottom:.7rem}
+  .sec-eyebrow .idx{color:var(--accent)}
+  .sec-eyebrow .line{height:1px; flex:1; background:var(--rule)}
+  h2{font-size:1.72rem; line-height:1.15; letter-spacing:-.015em; font-weight:750;
+    margin:.1rem 0 1rem; text-wrap:balance}
+  h3{font-size:1.06rem; font-weight:700; margin:2rem 0 .4rem; letter-spacing:-.01em}
+  p{margin:0 0 1.15rem}
+  a{color:var(--accent); text-decoration:none;
+    background-image:linear-gradient(var(--accent),var(--accent));
+    background-size:0 1.5px; background-repeat:no-repeat; background-position:0 100%;
+    transition:background-size .2s ease}
+  a:hover{background-size:100% 1.5px}
+  strong{font-weight:700; color:var(--text)}
+  .lead{font-size:1.16rem}
+  .lead::first-letter{}
+
+  /* pull quote */
+  .pull{margin:2rem 0; padding-left:1.2rem; border-left:2px solid var(--accent);
+    font-size:1.34rem; line-height:1.4; font-weight:600; letter-spacing:-.015em;
+    color:var(--text); text-wrap:balance}
+
+  /* inline code */
+  code{font-family:var(--mono); font-size:.86em; background:var(--accent-soft);
+    color:var(--accent-2); padding:.08em .38em; border-radius:4px;
+    border:1px solid color-mix(in srgb,var(--accent) 22%, transparent)}
+  @media (prefers-color-scheme:dark){ code{color:var(--accent-2)} }
+
+  /* terminal / code blocks (always dark) */
+  figure.term{margin:1.8rem -0.4rem; background:var(--code-bg); border-radius:10px;
+    border:1px solid #1c2833; box-shadow:var(--shadow); overflow:hidden}
+  @media (min-width:720px){ figure.term{margin:1.9rem -2.2rem} }
+  .term-bar{display:flex; align-items:center; gap:.5rem; padding:.6rem .85rem;
+    border-bottom:1px solid #1a2632; background:#0d141b}
+  .term-bar .d{width:11px; height:11px; border-radius:50%; background:#2b3a48}
+  .term-bar .t{font-family:var(--mono); font-size:.72rem; color:#5f6f7e;
+    margin-left:.4rem; letter-spacing:.02em}
+  figure.term pre{margin:0; padding:1rem 1.15rem; overflow-x:auto;
+    font-family:var(--mono); font-size:.82rem; line-height:1.65; color:var(--code-fg)}
+  figure.term figcaption{font-family:var(--mono); font-size:.72rem; color:#5f6f7e;
+    padding:.55rem .95rem; border-top:1px solid #16212b; background:#0c1219}
+  .c{color:var(--code-dim)}
+  .pr{color:var(--code-prompt)}
+  .ok{color:var(--code-ok)}
+  .wn{color:var(--code-warn)}
+  .st{color:var(--code-str)}
+  .hl{color:#fff; font-weight:600}
+
+  /* recon / write-shape tables */
+  .tablewrap{overflow-x:auto; margin:1.6rem 0; border:1px solid var(--border);
+    border-radius:10px; background:var(--surface)}
+  table{border-collapse:collapse; width:100%; font-size:.88rem}
+  th,td{text-align:left; padding:.62rem .85rem; border-bottom:1px solid var(--rule)}
+  tr:last-child td{border-bottom:0}
+  th{font-family:var(--mono); font-size:.72rem; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--faint); font-weight:600; background:color-mix(in srgb,var(--accent) 6%,transparent)}
+  td{color:var(--muted)}
+  td:first-child{color:var(--text); font-family:var(--mono); font-size:.82rem; white-space:nowrap}
+  td.mono{font-family:var(--mono); font-size:.8rem; color:var(--text)}
+
+  /* field notes (the gotchas) */
+  .notes{margin:1.6rem 0; display:flex; flex-direction:column; gap:0}
+  .note{display:grid; grid-template-columns:2.3rem 1fr; gap:.4rem 1rem;
+    padding:1.05rem 0; border-top:1px solid var(--rule)}
+  .note:last-child{border-bottom:1px solid var(--rule)}
+  .note .n{font-family:var(--mono); font-size:.85rem; color:var(--accent); font-weight:700;
+    padding-top:.15rem}
+  .note h4{margin:0 0 .3rem; font-size:1.02rem; font-weight:700; letter-spacing:-.01em}
+  .note p{margin:0; font-size:.96rem; color:var(--muted)}
+
+  /* callout */
+  .callout{margin:1.8rem 0; padding:1.05rem 1.2rem; background:var(--amber-soft);
+    border:1px solid color-mix(in srgb,var(--amber) 30%,transparent); border-radius:9px;
+    font-size:.97rem}
+  .callout .lbl{font-family:var(--mono); font-size:.7rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--amber); font-weight:700; display:block; margin-bottom:.35rem}
+  .callout p{margin:0; color:var(--text)}
+
+  /* footer */
+  footer{padding:3rem 0 4.5rem; color:var(--muted); font-size:.94rem}
+  footer .kicker{font-family:var(--mono); font-size:.72rem; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--accent); font-weight:600; margin-bottom:.6rem}
+  footer .cmds{font-family:var(--mono); font-size:.8rem; color:var(--muted); margin-top:1rem;
+    line-height:2}
+  footer .cmds b{color:var(--accent-2); font-weight:600}
+  footer .sig{margin-top:2rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+    font-size:.82rem; color:var(--faint)}
+
+  :focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:3px}
+
+  .fade{opacity:0; transform:translateY(12px); animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
+  .fade.d1{animation-delay:.06s} .fade.d2{animation-delay:.13s} .fade.d3{animation-delay:.2s}
+  @keyframes rise{to{opacity:1; transform:none}}
+  .cursor{display:inline-block; width:.55ch; height:1.05em; vertical-align:-.14em;
+    background:var(--accent); margin-left:.15em; animation:blink 1.05s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){
+    .fade{opacity:1; transform:none; animation:none}
+    .cursor{animation:none}
+    #progress{transition:none}
+    a{transition:none}
+  }
+</style>
+</head>
+<body>
+
+<div id="progress" aria-hidden="true"></div>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow fade">Reverse engineering · Field notes</div>
+    <h1 class="fade d1">The switch that had no API<span class="cursor" aria-hidden="true"></span></h1>
+    <p class="dek fade d2">A 25-gigabit QNAP switch, a sluggish web GUI, no SSH, and not a page of
+      documentation. So I read the JavaScript, found the hidden REST API it was hiding behind, and
+      wrote my own tool to drive it.</p>
+    <div class="meta fade d3">
+      <span><b>David Rodgers</b></span><span class="dot"></span>
+      <span>July 2026</span><span class="dot"></span>
+      <span>~9 min read</span><span class="dot"></span>
+      <span>QNAP QSW-M5216-1T</span>
+    </div>
+  </div>
+</header>
+
+<article class="wrap">
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">01</span><span>The problem</span><span class="line"></span></div>
+    <h2>A lovely box wrapped around one frustrating limitation</h2>
+    <p class="lead">I have a QNAP QSW-M5216-1T — sixteen ports of 25-gigabit fiber plus a 10-gig
+      copper uplink, sitting right at the center of my network. The hardware is excellent. The
+      management story is not: the only supported way to configure it is a slow single-page web app.
+      Add a VLAN? Click through the GUI. Tag a port? GUI. Every single time.</p>
+    <p>There is no SSH. No Telnet. No published API. QNAP's answer to "how do I automate this" is,
+      essentially, <em>you don't</em>.</p>
+    <p>But here's the thing about a web UI: it is a program, and that program is talking to the
+      switch over the network. If I could work out what it was saying, I could say the same things
+      myself — from a script, a cron job, a config file checked into git. So I went looking.</p>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">02</span><span>Reconnaissance</span><span class="line"></span></div>
+    <h2>Knock on every port first</h2>
+    <p>Before anything clever, the boring question: what is this thing even listening on?</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">~ — port scan</span></div>
+      <pre><span class="pr">$</span> for p in 22 23 80 161 443; do nc -zv -w2 192.0.2.10 $p; done
+22/tcp   <span class="wn">timed out</span>     <span class="c"># no SSH</span>
+23/tcp   <span class="wn">refused</span>       <span class="c"># no Telnet</span>
+80/tcp   <span class="ok">open</span>          <span class="c"># HTTP  — the web UI</span>
+443/tcp  <span class="ok">open</span>          <span class="c"># HTTPS</span>
+161/udp  <span class="ok">open</span>          <span class="c"># SNMP  (read-only; no VLAN writes)</span></pre>
+    </figure>
+    <p>No shell access of any kind, so this switch can't be driven like a Cisco or Arista box. SNMP
+      is monitoring-oriented — great for graphs, useless for creating VLANs. That left exactly one
+      real avenue: whatever the web UI on port 80 was doing. Which is what I was hoping for.</p>
+    <p>Fetching the root page returned a near-empty HTML shell — a single <code>&lt;div id="app"&gt;</code>
+      and three webpack bundles. That's a <strong>single-page app</strong>: an empty container that
+      JavaScript fills in at runtime. And crucially, every backend call the UI makes lives inside
+      those bundles, in plain sight.</p>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">03</span><span>The map</span><span class="line"></span></div>
+    <h2>The app is just JavaScript, and JavaScript can be read</h2>
+    <p>I downloaded <code>app.js</code> and <code>vendor.js</code> — minified, but not obfuscated.
+      Minification mangles variable names; it doesn't hide string literals. And a REST client is made
+      of string literals. Searching the bundle for URL-shaped strings turned up the base immediately:
+      <code>/api/v1</code>.</p>
+    <p>The endpoints themselves are built dynamically — the code uses one axios instance (minified to
+      <code>Hi</code>) and one base constant (<code>Fi = "/api/v1"</code>), so every call looks like
+      <code>Hi.get(Fi + "/vlan")</code>. That is a <em>pattern</em>. And a pattern is a regex.</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">~ — mapping the API</span></div>
+      <pre><span class="c"># every backend call in the bundle has the same shape:</span>
+<span class="c">#   Hi.get(Fi + "/vlan")   Hi.post(Fi + "/lacp/group")   ...</span>
+<span class="pr">$</span> grep -oE 'Hi\.(get|post|put|delete)\(Fi\+"[^"]+"' app.js | sort -u
+   <span class="hl">→ 126 endpoints</span>  <span class="c"># vlans, ports, lacp, acl, qos, rstp, poe, snmp, lldp…</span></pre>
+      <figcaption>One regular expression, zero requests to the switch.</figcaption>
+    </figure>
+    <p class="pull">A single regex mapped the entire API — 126 endpoints — without making one call
+      to the switch.</p>
+    <p>Better still, the service functions were named things like <code>getVlan</code>,
+      <code>setVlan</code>, <code>delVlan</code>, and <code>addLagStatus</code>. Minification kept
+      those names. So the purpose of each endpoint was legible straight from the code, before I ever
+      sent a byte.</p>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">04</span><span>Authentication</span><span class="line"></span></div>
+    <h2>Getting in</h2>
+    <p>Reading the <code>postLogin</code> action gave the whole handshake. The UI POSTs a username and
+      a password to <code>/api/v1/users/login</code> — but the password is run through a function
+      called <code>ezEncode</code> first. That looked like it might be a custom cipher. It wasn't.</p>
+    <p>I pulled <code>ezEncode</code>'s implementation out of the bundle and found it building output
+      from this alphabet: <code>ABC…xyz0123456789+/</code>. That's the standard Base64 alphabet.
+      <code>ezEncode</code> is just a hand-rolled Base64 encoder. The "encoding" is
+      <code>base64(password)</code> — no secret, no salt, no hash.</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">~ — login</span></div>
+      <pre><span class="pr">$</span> curl -s -X POST http://192.0.2.10/api/v1/users/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username":"<user>","password":"'$(printf %s 'hunter2' | base64)'"}'
+
+{"error_code":<span class="ok">200</span>,"error_message":"OK","result":"<span class="st">eyJhbGciOiJSUzI1NiI…</span>"}</pre>
+    </figure>
+    <p>That <code>result</code> is a <strong>JWT</strong>. Decode its payload and the switch tells you
+      exactly who it thinks you are:</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">~ — jwt payload</span></div>
+      <pre>{"Ip":"192.0.2.20","Privilege":<span class="hl">15</span>,"UserName":"<user>","iat":1783229194}</pre>
+    </figure>
+    <p>From there, every other call carries <code>Authorization: Bearer &lt;jwt&gt;</code>. There's no
+      <code>exp</code> claim — the session is tracked server-side — so a stale token just starts
+      returning <code>401</code>, at which point you log in again and retry. That single rule ("on a
+      401, re-authenticate once") is the entire session-management story.</p>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">05</span><span>Conventions</span><span class="line"></span></div>
+    <h2>How the API talks — and the trap in it</h2>
+    <p>Almost every response is wrapped the same way: <code>{"error_code":200,"error_message":"OK","result":…}</code>.
+      Collections come back as arrays of <code>{key, val}</code>. Simple enough to read.</p>
+    <p>Writing is where it got interesting. Different endpoints expect <strong>different body
+      shapes</strong>, and — this is the part that cost me an hour — sending the wrong shape doesn't
+      error. It returns <code>200 OK</code> with <code>result: null</code> and silently changes
+      nothing.</p>
+    <p>I hit this trying to set a port's MTU. My request looked right, the switch said OK, and the MTU
+      didn't budge. The fix was to stop guessing and read the exact object the UI builds for that
+      action — which turned out to be <code>{idx, data}</code>, not the <code>{key, val}</code> that
+      the matching GET returns. Here's the map I ended up with:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Endpoint</th><th>Verb</th><th>Body shape</th></tr></thead>
+        <tbody>
+          <tr><td>/vlan</td><td>POST · PUT</td><td class="mono">{"data":[{"key","val":[…]}]}</td></tr>
+          <tr><td>/vlan</td><td>DELETE</td><td class="mono">{"idx":["100"]}</td></tr>
+          <tr><td>/portlist</td><td>PUT</td><td class="mono">[{"idx","data":{…}}] ← not key/val!</td></tr>
+          <tr><td>/lacp/group</td><td>POST</td><td class="mono">{"idx","data":{PortMembers,AggrMode}}</td></tr>
+          <tr><td>/system/save</td><td>PUT</td><td class="mono">{} — persists running→startup</td></tr>
+          <tr><td>/system/config</td><td>POST</td><td class="mono">multipart form-data, field "conf"</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <span class="lbl">The lesson</span>
+      <p>A <code>200</code> is not proof a write took effect. On an undocumented API, always read the
+        value back — the switch will happily accept a request it has no intention of honoring.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">06</span><span>Discoveries</span><span class="line"></span></div>
+    <h2>What the data told me</h2>
+    <p>With reads and writes both working, the switch's actual model came into focus — including
+      several things the web UI never shows you. VLANs, for instance, are a pure 802.1Q membership
+      table: a list of ports, each tagged or untagged. There is no port "mode," no PVID… and no place
+      to put a name. I tried anyway:</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">~ — can a VLAN have a name?</span></div>
+      <pre><span class="pr">$</span> <span class="c"># create VLAN 3990 and ask it to remember a name…</span>
+<span class="pr">$</span> curl … -d '{"data":[{"key":"3990","<span class="wn">name":"STORAGE"</span>,"val":[…]}]}'
+{"error_code":<span class="ok">200</span>,"error_message":"OK"}
+
+<span class="pr">$</span> <span class="c"># …now read it back:</span>
+{"key":"3990","val":[{"Port":"16","Tagged":true}]}   <span class="c"># the name is gone.</span></pre>
+      <figcaption>Accepted without complaint, dropped without a trace.</figcaption>
+    </figure>
+    <p>So the firmware simply has no concept of VLAN names — which is why my tool stores them locally
+      and paints them back on. That was one of six behaviors that only surfaced through live testing.
+      Every one of them is now baked into the tool as code, so nobody has to rediscover it:</p>
+    <div class="notes">
+      <div class="note"><div class="n">i</div><div>
+        <h4>Silent no-op writes</h4>
+        <p>The wrong body shape returns <code>200</code> and changes nothing. Read the UI's exact payload; always verify.</p></div></div>
+      <div class="note"><div class="n">ii</div><div>
+        <h4>VLAN names don't exist</h4>
+        <p>Sent, accepted, silently discarded. The GUI has no name field either. Labels have to live client-side.</p></div></div>
+      <div class="note"><div class="n">iii</div><div>
+        <h4>MTU is hidden but real</h4>
+        <p>Not in the GUI at all, yet fully settable per interface. Empirically the switch clamps it at 10000; default is 9016.</p></div></div>
+      <div class="note"><div class="n">iv</div><div>
+        <h4>There is no "trunk mode"</h4>
+        <p>No PVID, no port mode — a trunk is literally "tagged member of every VLAN." A VLAN made later won't include a port until you re-add it.</p></div></div>
+      <div class="note"><div class="n">v</div><div>
+        <h4>Bonding wipes VLANs</h4>
+        <p>Creating a link-aggregation group resets its member ports' VLAN config. Bond first, then assign VLANs to the LAG interface.</p></div></div>
+      <div class="note"><div class="n">vi</div><div>
+        <h4>Running vs. startup</h4>
+        <p>Writes take effect immediately but vanish on reboot until you <code>PUT /system/save</code> with an empty body.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">07</span><span>The payoff</span><span class="line"></span></div>
+    <h2>Turning it into a tool</h2>
+    <p>Knowing the API is one thing; living with it is another. I wrapped everything in a single
+      Python file, <code>qsw.py</code>, in two layers. Underneath sits a client class that handles the
+      unglamorous parts — Base64 login, JWT caching, unwrapping the response envelope, re-authenticating
+      on a 401, and knowing each endpoint's quirky body shape. On top sits a CLI that speaks in terms a
+      network admin actually thinks in.</p>
+    <p>That second layer is where the real value is. The switch models VLANs as per-VLAN membership
+      tables; I want to say "make port 17 a trunk" or "reconcile the whole switch to this file." So the
+      tool translates intent into the switch's model — and does it idempotently, with a dry-run and an
+      automatic backup before anything is written.</p>
+    <figure class="term">
+      <div class="term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">qsw — the tool</span></div>
+      <pre><span class="pr">$</span> qsw <span class="hl">vlans</span>                         <span class="c"># the whole VLAN table, with labels</span>
+<span class="pr">$</span> qsw <span class="hl">trunk</span> 17 --native mgmt        <span class="c"># tag port 17 on every VLAN</span>
+<span class="pr">$</span> qsw <span class="hl">find</span> a89c6c                   <span class="c"># which port is this host on?</span>
+  A8:9C:6C:88:10:2D  ->  port 11, VLAN 30
+<span class="pr">$</span> qsw <span class="hl">apply</span> switch.yaml --dry-run    <span class="c"># reconcile from a declarative file</span></pre>
+    </figure>
+    <p>The guiding principle throughout: <strong>the switch's own web UI is the reference
+      implementation.</strong> Whenever a body shape or a field value was unclear, the answer was never
+      a guess — it was sitting right there in how the UI built that exact request.</p>
+  </section>
+
+  <section>
+    <div class="sec-eyebrow"><span class="idx">08</span><span>Takeaways</span><span class="line"></span></div>
+    <h2>If you want to do this to your own gear</h2>
+    <p>Nothing here is specific to QNAP. Any appliance with a modern web UI and no official API is a
+      candidate, and the workflow is the same every time:</p>
+    <p><strong>Scan first</strong> to find the management surface and rule out a real CLI.
+      <strong>Spot the SPA</strong> and pull its JavaScript bundles.
+      <strong>Regex the bundle</strong> for the API base and the request pattern — that maps the whole
+      surface for free. <strong>Lift the auth flow</strong> straight from the login code and reproduce
+      it with <code>curl</code>. Then <strong>confirm live</strong>: reads first, then careful writes on
+      something you can afford to break — a link-down port, a throwaway VLAN — always reading back, always
+      reverting.</p>
+    <p>Every write in this project was tested on unused ports and disposable VLAN IDs and then reverted;
+      the switch went back to its exact original state after each experiment. The reward for a couple of
+      evenings of reading minified JavaScript is a switch I now manage from a text file instead of a
+      spinner — and a small map of an API that officially doesn't exist.</p>
+  </section>
+
+</article>
+
+<footer class="wrap">
+  <div class="kicker">The tool, in one screen</div>
+  <p>Nineteen commands, one Python file, zero clicks. The full toolset:</p>
+  <div class="cmds">
+    <b>vlans · vlan · add · set · del</b> — VLAN CRUD<br>
+    <b>trunk · access · name</b> — port roles &amp; local labels<br>
+    <b>port · mtu · lag</b> — interface, frame size, bonding<br>
+    <b>macs · find · neighbors · health</b> — visibility<br>
+    <b>apply · backup · restore · save</b> — declarative config &amp; safety<br>
+    <b>raw</b> — an escape hatch to all 126 endpoints
+  </div>
+  <p class="sig">Field notes from reverse-engineering the QNAP QSW-M5216-1T. All testing done on
+    link-down ports and throwaway VLAN IDs, reverted after each run.</p>
+</footer>
+
+<script>
+  (function(){
+    var bar = document.getElementById('progress');
+    function onScroll(){
+      var h = document.documentElement;
+      var max = h.scrollHeight - h.clientHeight;
+      var pct = max > 0 ? (h.scrollTop || document.body.scrollTop) / max : 0;
+      bar.style.width = (pct * 100).toFixed(2) + '%';
+    }
+    document.addEventListener('scroll', onScroll, {passive:true});
+    window.addEventListener('resize', onScroll);
+    onScroll();
+  })();
+</script>
+
+</body>
+</html>
