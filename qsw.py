@@ -2,13 +2,19 @@
 """
 qsw.py — programmatic control of a QNAP QSW-M series managed switch (QSS).
 
-The QSS web UI is a single-page app that drives a private REST API at
-`/api/v1`. This tool speaks that same API directly, so anything the web UI
-can do can be scripted. Focus is VLANs, but a `raw` escape hatch reaches all
-126 endpoints.
+The QSS web UI is a single-page app that drives a private REST API. This tool
+speaks that same API directly, so anything the web UI can do can be scripted.
+Focus is VLANs, but a `raw` escape hatch reaches every endpoint.
 
-Auth flow (reverse-engineered from the UI bundle):
-  POST /api/v1/users/login  {"username": <user>, "password": base64(<pass>)}
+Two API generations are supported and auto-detected via GET /api/about:
+  - v1  (e.g. QSW-M5216-1T): base path /api/v1
+  - v2  (e.g. QSW-M3216R-8S8T): base path /api/v2, richer surface, VLANs have
+        native names, FC is an 'enable'/'disable' string, different port layout.
+The client derives the port model (physical count, LAG offset) from /lacp/info
+and port types from each interface's MediaType, so it adapts to the model.
+
+Auth flow (identical on both, reverse-engineered from the UI bundle):
+  POST /api/<ver>/users/login  {"username": <user>, "password": base64(<pass>)}
     -> {"error_code":200, "result": "<JWT>"}
   Every other call sends:   Authorization: Bearer <JWT>
 
@@ -56,10 +62,26 @@ class QSWError(Exception):
     pass
 
 
+def _fc_on(val):
+    """Is flow-control enabled? v1 stores FC as a bool, v2 as 'enable'/'disable'."""
+    fc = val.get("FC")
+    return fc is True or fc == "enable"
+
+
+def _fc_encode(cur_val, on):
+    """Encode a flow-control write the way this switch expects, matching the
+    type of the current value (v2 = 'enable'/'disable' string, v1 = bool)."""
+    if isinstance(cur_val.get("FC"), str):
+        return "enable" if on else "disable"
+    return on
+
+
 class QSW:
     def __init__(self, host=DEFAULT_HOST, scheme=DEFAULT_SCHEME, user=None, password=None,
                  verify=False, timeout=15):
-        self.base = f"{scheme}://{host}/api/v1"
+        self.root = f"{scheme}://{host}"
+        self.api_version = None          # 'v1' / 'v2', detected from /api/about
+        self.base = None                 # f"{root}/api/{version}", set by _ensure_base()
         self.host = host
         self.user = user
         self.password = password
@@ -68,6 +90,7 @@ class QSW:
         self.token = None
         self.s = requests.Session()
         self._token_path = TOKEN_DIR / f"{host}.token"
+        self._pm = None                  # cached port model (from /lacp/info)
 
     # ---- auth -------------------------------------------------------------
     def _load_creds(self):
@@ -94,6 +117,8 @@ class QSW:
             data = json.loads(self._token_path.read_text())
             # tokens are session-scoped; treat as valid for 20 min then refresh
             if time.time() - data["ts"] < 1200:
+                if data.get("version"):          # restore the cached API version too
+                    self.api_version = data["version"]
                 return data["token"]
         except Exception:
             pass
@@ -102,12 +127,37 @@ class QSW:
     def _store_token(self, token):
         try:
             TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-            self._token_path.write_text(json.dumps({"token": token, "ts": time.time()}))
+            self._token_path.write_text(json.dumps(
+                {"token": token, "ts": time.time(), "version": self.api_version}))
             os.chmod(self._token_path, 0o600)
         except Exception:
             pass
 
+    def _detect_version(self):
+        """Ask GET /api/about for the API generation ('v1'/'v2'). Both QSS
+        generations answer this unauthenticated; the M5216 (v1) and M3216R (v2)
+        differ only in the base path. Defaults to 'v1' if absent/unparseable."""
+        try:
+            r = self.s.get(f"{self.root}/api/about", verify=self.verify, timeout=self.timeout)
+            ver = ((r.json() or {}).get("result") or {}).get("ApiVersion")
+            if ver:
+                return ver
+        except Exception:
+            pass
+        return "v1"
+
+    def _ensure_base(self):
+        """Resolve self.base = <root>/api/<version> before any call is built."""
+        if self.base:
+            return
+        if not self.api_version:
+            self._cached_token()             # a fresh token cache also carries the version
+        if not self.api_version:
+            self.api_version = self._detect_version()
+        self.base = f"{self.root}/api/{self.api_version}"
+
     def login(self, force=False):
+        self._ensure_base()
         if not force:
             tok = self._cached_token()
             if tok:
@@ -128,6 +178,7 @@ class QSW:
 
     # ---- core request -----------------------------------------------------
     def request(self, method, path, data=None, params=None, _retry=True):
+        self._ensure_base()
         if not self.token:
             self.login()
         url = self.base + path
@@ -160,11 +211,32 @@ class QSW:
         res = self.request("GET", "/vlan", params={"key": str(vid)})
         return res[0] if res else None
 
-    def vlan_write(self, vid, tagged=None, untagged=None, action="add"):
+    def _vlan_edit_path(self):
+        """VLAN membership EDITs use PUT /vlan on v1 but PUT /vlan/align on v2
+        (plain PUT /vlan returns 400 there). Create (POST) and delete (DELETE)
+        stay on /vlan for both."""
+        return "/vlan/align" if self.api_version == "v2" else "/vlan"
+
+    def _vlan_put(self, entries):
+        return self.request("PUT", self._vlan_edit_path(), data={"data": entries})
+
+    def vlan_write(self, vid, tagged=None, untagged=None, action="add", name=None):
         val = [{"Port": str(p), "Tagged": True} for p in (tagged or [])]
         val += [{"Port": str(p), "Tagged": False} for p in (untagged or [])]
-        method = "POST" if action == "add" else "PUT"
-        return self.request(method, "/vlan", data={"data": [{"key": str(vid), "val": val}]})
+        entry = {"key": str(vid), "val": val}
+        if name is not None:
+            entry["name"] = name          # v2 has native VLAN names; v1 ignores this
+        if action == "add":
+            return self.request("POST", "/vlan", data={"data": [entry]})
+        return self._vlan_put([entry])
+
+    @staticmethod
+    def _vlan_entry(v, port, new_val):
+        """Build a /vlan edit entry, preserving the native name (v2) if present."""
+        entry = {"key": v["key"], "val": new_val}
+        if "name" in v:
+            entry["name"] = v["name"]
+        return entry
 
     def vlan_delete(self, vids):
         return self.request("DELETE", "/vlan", data={"idx": [str(v) for v in vids]})
@@ -194,7 +266,7 @@ class QSW:
             new_val.append({"Port": port, "Tagged": want_tagged})
             changes.append((vid, want_tagged))
             if not dry_run:
-                self.request("PUT", "/vlan", data={"data": [{"key": vid, "val": new_val}]})
+                self._vlan_put([self._vlan_entry(v, port, new_val)])
         return changes
 
     def set_access(self, port, vid, dry_run=False):
@@ -224,7 +296,7 @@ class QSW:
                 action = "removed"
             changes.append((k, action))
             if not dry_run:
-                self.request("PUT", "/vlan", data={"data": [{"key": k, "val": new_val}]})
+                self._vlan_put([self._vlan_entry(v, port, new_val)])
         return changes
 
     def ports_status(self):
@@ -233,6 +305,21 @@ class QSW:
     def ports_config(self):
         """Per-port config (Speed, MTU, Alias, ...) keyed by port number."""
         return {p["key"]: p["val"] for p in self.request("GET", "/ports")}
+
+    def _portlist_write(self, payload):
+        """PUT a [{idx, data}] port-config payload. v2 differs from v1: the
+        write must carry MediaType capitalized ('Copper'/'Fiber' — reads return
+        it lowercase) and an ?autosave=true query, or the whole record is
+        silently ignored. (Even so, v2 accepts Shutdown/Speed/Description but
+        drops FC and MTU here — callers verify via read-back.)"""
+        path = "/portlist"
+        if self.api_version == "v2":
+            path = "/portlist?autosave=true"
+            for item in payload:
+                mt = item.get("data", {}).get("MediaType")
+                if isinstance(mt, str):
+                    item["data"]["MediaType"] = "Copper" if mt.lower() == "copper" else "Fiber"
+        return self.request("PUT", path, data=payload)
 
     def set_port_mtu(self, ports, mtu, dry_run=False):
         """Set MTU (max frame size) on one or more interfaces. MTU is a
@@ -254,7 +341,13 @@ class QSW:
             payload.append({"idx": p, "data": val})
             changes.append((p, old, mtu))
         if payload and not dry_run:
-            self.request("PUT", "/portlist", data=payload)
+            self._portlist_write(payload)
+            fresh = self.ports_config()          # a 200 is not proof — verify it took
+            bad = [p for p, _o, n in changes if int(fresh.get(p, {}).get("MTU", -1)) != n]
+            if bad:
+                raise QSWError(f"MTU change was not applied on port(s) {','.join(bad)} — "
+                               f"this switch (API {self.api_version}) does not accept per-port "
+                               f"MTU via portlist.")
         return changes
 
     def set_port(self, ports, shutdown=None, fc=None, speed=None, dry_run=False):
@@ -272,8 +365,8 @@ class QSW:
             if shutdown is not None and bool(val.get("Shutdown")) != shutdown:
                 val["Shutdown"] = shutdown
                 ch.append("disabled" if shutdown else "enabled")
-            if fc is not None and bool(val.get("FC")) != fc:
-                val["FC"] = fc
+            if fc is not None and _fc_on(val) != fc:
+                val["FC"] = _fc_encode(val, fc)
                 ch.append(f"flow-control {'on' if fc else 'off'}")
             if speed is not None:
                 val["Speed"] = speed
@@ -283,7 +376,18 @@ class QSW:
                 payload.append({"idx": p, "data": val})
                 changes.append((p, ch))
         if payload and not dry_run:
-            self.request("PUT", "/portlist", data=payload)
+            self._portlist_write(payload)
+            fresh = self.ports_config()          # a 200 is not proof — verify it took
+            unmet = []
+            for p, _ch in changes:
+                fv = fresh.get(p, {})
+                if shutdown is not None and bool(fv.get("Shutdown")) != shutdown:
+                    unmet.append(f"port {p} enable/disable")
+                if fc is not None and _fc_on(fv) != fc:
+                    unmet.append(f"port {p} flow-control")
+            if unmet:
+                raise QSWError("the switch did not apply: " + ", ".join(unmet) +
+                               f" (unsupported via portlist on API {self.api_version}).")
         return changes
 
     def lldp_neighbors(self):
@@ -302,9 +406,30 @@ class QSW:
         return self.request("GET", "/mac").get("AgeTime")
 
     # ---- LAG / link aggregation ------------------------------------------
+    def port_model(self):
+        """Interface layout derived from /lacp/info (works on v1 and v2):
+        physical ports are 1..StartIndex, LAG group N is interface StartIndex+N,
+        so interfaces run 1..StartIndex+MaxPortChannels. The M5216 (v1) reports
+        StartIndex 17 (17 phys, LAG 18-25); the M3216R (v2) reports 16 (16 phys,
+        LAG 17-24)."""
+        if self._pm is None:
+            li = self.request("GET", "/lacp/info") or {}
+            start = int(li.get("StartIndex", PHYS_PORTS))
+            chans = int(li.get("MaxPortChannels", MAX_IFACE - PHYS_PORTS))
+            self._pm = {"lag_start": start, "phys": start, "max_iface": start + chans}
+        return self._pm
+
     def lag_start(self):
         """Interface-index offset: LAG group N is interface lag_start()+N."""
-        return self.request("GET", "/lacp/info").get("StartIndex", 17)
+        return self.port_model()["lag_start"]
+
+    @property
+    def phys_ports(self):
+        return self.port_model()["phys"]
+
+    @property
+    def max_iface(self):
+        return self.port_model()["max_iface"]
 
     def lag_groups(self):
         return self.request("GET", "/lacp/group")
@@ -326,6 +451,7 @@ class QSW:
 
     def get_config_blob(self, _retry=True):
         """Raw config backup (binary blob) from GET /system/config."""
+        self._ensure_base()
         if not self.token:
             self.login()
         r = self.s.get(self.base + "/system/config",
@@ -340,6 +466,7 @@ class QSW:
     def restore_config(self, path, _retry=True):
         """Upload a config backup to POST /system/config (multipart, field
         'conf'). Destructive: replaces the whole config and reboots."""
+        self._ensure_base()
         if not self.token:
             self.login()
         with open(path, "rb") as fh:
@@ -358,8 +485,10 @@ class QSW:
 
 
 # ---- port list parsing ----------------------------------------------------
-def parse_ports(spec):
-    """'1,2,5-8,17' -> [1,2,5,6,7,8,17]"""
+def parse_ports(spec, max_iface=MAX_IFACE):
+    """'1,2,5-8,17' -> [1,2,5,6,7,8,17]. `max_iface` bounds the range and is
+    the switch's real interface count (derived per-model); it defaults to the
+    v1 layout for callers that don't have a connection yet."""
     if not spec:
         return []
     out = []
@@ -373,10 +502,23 @@ def parse_ports(spec):
         else:
             out.append(int(part))
     for p in out:
-        if not 1 <= p <= MAX_IFACE:
-            raise QSWError(f"port {p} out of range 1-{MAX_IFACE} "
-                           f"(1-{PHYS_PORTS} physical, 18-{MAX_IFACE} LAG groups)")
+        if not 1 <= p <= max_iface:
+            raise QSWError(f"port {p} out of range 1-{max_iface}")
     return sorted(set(out))
+
+
+def port_label(sw, key, cfg_val):
+    """Human label for an interface, derived from MediaType (present on both v1
+    and v2) so SFP vs RJ45 is correct regardless of model layout."""
+    k = int(key)
+    if k > sw.lag_start():
+        return f"LAG {k - sw.lag_start()}"
+    media = (cfg_val or {}).get("MediaType", "")
+    if media == "fiber":
+        return f"SFP {key}"
+    if media == "copper":
+        return f"RJ45 {key}"
+    return f"port {key}"
 
 
 def fmt_ports(nums):
@@ -429,7 +571,7 @@ def cmd_vlans(sw, args):
     for v in sorted(data, key=lambda x: int(x["key"])):
         tagged = [m["Port"] for m in v["val"] if m["Tagged"]]
         untag = [m["Port"] for m in v["val"] if not m["Tagged"]]
-        label = names.get(v["key"], "")
+        label = v.get("name") or names.get(v["key"], "")   # native (v2) then local
         print(f"{v['key']:>5}  {label:<12}  {fmt_ports(tagged):<22}  {fmt_ports(untag):<22}")
 
 
@@ -442,7 +584,7 @@ def cmd_vlan(sw, args):
         print(json.dumps(v, indent=2)); return
     tagged = [m["Port"] for m in v["val"] if m["Tagged"]]
     untag = [m["Port"] for m in v["val"] if not m["Tagged"]]
-    label = load_names().get(vid)
+    label = v.get("name") or load_names().get(vid)
     print(f"VLAN {v['key']}" + (f"  ({label})" if label else ""))
     print(f"  tagged   : {fmt_ports(tagged)}")
     print(f"  untagged : {fmt_ports(untag)}")
@@ -450,12 +592,17 @@ def cmd_vlan(sw, args):
 
 def _write(sw, args, action):
     vid = resolve_vid(args.id)
-    tagged = parse_ports(args.tagged)
-    untag = parse_ports(args.untagged)
+    tagged = parse_ports(args.tagged, sw.max_iface)
+    untag = parse_ports(args.untagged, sw.max_iface)
     overlap = set(tagged) & set(untag)
     if overlap:
         raise QSWError(f"ports in both tagged and untagged: {sorted(overlap)}")
-    sw.vlan_write(vid, tagged=tagged, untagged=untag, action=action)
+    name = None
+    if action == "edit":                       # preserve the native (v2) VLAN name
+        cur = sw.vlan(vid)
+        if cur and "name" in cur:
+            name = cur["name"]
+    sw.vlan_write(vid, tagged=tagged, untagged=untag, action=action, name=name)
     verb = "Added" if action == "add" else "Updated"
     print(f"{verb} VLAN {vid}: tagged={fmt_ports(tagged)} untagged={fmt_ports(untag)}")
     if args.save:
@@ -484,15 +631,15 @@ def cmd_del(sw, args):
         sw.save(); print("Persisted to startup config.")
 
 
-def _one_port(spec):
-    ports = parse_ports(spec)
+def _one_port(spec, max_iface=MAX_IFACE):
+    ports = parse_ports(spec, max_iface)
     if len(ports) != 1:
         raise QSWError(f"expected a single port, got {spec!r}")
     return ports[0]
 
 
 def cmd_trunk(sw, args):
-    port = _one_port(args.port)
+    port = _one_port(args.port, sw.max_iface)
     native = resolve_vid(args.native) if args.native else None
     exclude = [resolve_vid(x) for x in args.exclude.split(",")] if args.exclude else []
     changes = sw.set_trunk(port, native=native, exclude=exclude, dry_run=args.dry_run)
@@ -511,7 +658,7 @@ def cmd_trunk(sw, args):
 
 
 def cmd_access(sw, args):
-    port = _one_port(args.port)
+    port = _one_port(args.port, sw.max_iface)
     vid = resolve_vid(args.vlan)
     changes = sw.set_access(port, vid, dry_run=args.dry_run)
     prefix = "[dry-run] would make" if args.dry_run else "Made"
@@ -526,7 +673,7 @@ def cmd_access(sw, args):
 
 
 def cmd_mtu(sw, args):
-    ports = parse_ports(args.ports)
+    ports = parse_ports(args.ports, sw.max_iface)
     if args.value is None:  # show
         cur = sw.ports_config()
         for p in ports:
@@ -584,7 +731,7 @@ def cmd_neighbors(sw, args):
 
 
 def cmd_port(sw, args):
-    ports = parse_ports(args.ports)
+    ports = parse_ports(args.ports, sw.max_iface)
     shutdown = None
     if args.enable:
         shutdown = False
@@ -600,7 +747,7 @@ def cmd_port(sw, args):
                 print(f"port {p}: not found"); continue
             state = "disabled" if v.get("Shutdown") else "enabled"
             print(f"port {p}: {state}, speed={v.get('Speed')}, "
-                  f"flow-control={'on' if v.get('FC') else 'off'}, MTU={v.get('MTU')}")
+                  f"flow-control={'on' if _fc_on(v) else 'off'}, MTU={v.get('MTU')}")
         return
     changes = sw.set_port(ports, shutdown=shutdown, fc=fc, speed=speed, dry_run=args.dry_run)
     prefix = "[dry-run] would set" if args.dry_run else "Set"
@@ -634,7 +781,7 @@ def cmd_macs(sw, args):
     rows = sw.mac_table()
     names = load_names()
     if args.port:
-        want = set(str(p) for p in parse_ports(args.port))
+        want = set(str(p) for p in parse_ports(args.port, sw.max_iface))
         rows = [r for r in rows if r["port"] in want]
     if args.vlan:
         vid = resolve_vid(args.vlan)
@@ -697,12 +844,12 @@ def cmd_lag_list(sw, args):
 def cmd_lag_set(sw, args):
     if not 1 <= args.group <= 8:
         raise QSWError("LAG group must be 1-8")
-    ports = parse_ports(args.ports)
+    ports = parse_ports(args.ports, sw.phys_ports)
     if len(ports) < 2:
         raise QSWError("a LAG needs at least 2 member ports")
-    if any(p > 16 for p in ports):
-        raise QSWError("LAG members must be SFP28 ports 1-16 (10G port 17 and "
-                       "LAG interfaces can't be members)")
+    if any(p > sw.phys_ports for p in ports):
+        raise QSWError(f"LAG members must be physical ports 1-{sw.phys_ports} "
+                       f"(LAG interfaces can't be members)")
     mode = AGGR_MODE[args.mode]
     print(f"WARNING: bonding resets the VLAN config of ports {fmt_ports(ports)}; "
           f"the group becomes interface {sw.lag_start()+args.group}, which you then "
@@ -742,7 +889,7 @@ def cmd_ports(sw, args):
     print("-" * 42)
     for e in sorted(data, key=lambda x: int(x["key"])):
         p = int(e["key"]); v = e["val"]
-        name = f"SFP28 {p}" if p <= 16 else ("10GbE" if p == 17 else f"LAG {p-17}")
+        name = port_label(sw, p, cfg.get(str(p), {}))
         speed = f"{int(v['Speed'])//1000}G" if v.get("Speed") else "-"
         link = "up" if v.get("Link") else "down"
         mtu = cfg.get(str(p), {}).get("MTU", "-")
@@ -807,7 +954,9 @@ def cmd_apply(sw, args):
         plan.append(f"create VLAN {v} (empty)")
 
     # Current membership tables: vid -> {port: tagged_bool}
-    table = {v["key"]: {m["Port"]: m["Tagged"] for m in v["val"]} for v in sw.vlans()}
+    _vlans = sw.vlans()
+    table = {v["key"]: {m["Port"]: m["Tagged"] for m in v["val"]} for v in _vlans}
+    vlan_names_now = {v["key"]: v.get("name") for v in _vlans}   # preserve native (v2) names
     for v in to_create:
         table[v] = {}
     original = {vid: dict(pm) for vid, pm in table.items()}
@@ -836,7 +985,7 @@ def cmd_apply(sw, args):
             kw["shutdown"] = not pc["enabled"]
         if "flow_control" in pc:
             fc = bool(pc["flow_control"])
-            if bool(cur.get("FC")) != fc:
+            if _fc_on(cur) != fc:
                 kw["fc"] = fc
         if pc.get("speed"):
             kw["speed"] = SPEED_MAP[pc["speed"]]
@@ -877,7 +1026,8 @@ def cmd_apply(sw, args):
     for vid in changed_vids:
         tagged = [p for p, t in table[vid].items() if t]
         untag = [p for p, t in table[vid].items() if not t]
-        sw.vlan_write(vid, tagged=tagged, untagged=untag, action="edit")
+        sw.vlan_write(vid, tagged=tagged, untagged=untag, action="edit",
+                      name=vlan_names_now.get(vid))
     for pk, kw in attr_actions:
         if "mtu" in kw:
             sw.set_port_mtu([pk], kw["mtu"])

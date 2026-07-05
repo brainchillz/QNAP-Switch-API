@@ -1,27 +1,50 @@
-# NetworkController — QNAP QSW-M5216-1T programmatic control
+# NetworkController — QNAP QSW managed-switch programmatic control
 
-Script-driven management of the QNAP **QSW-M5216-1T** 25GbE managed switch at
-`192.0.2.10`, without touching the QSS web UI.
+Script-driven management of QNAP **QSW** managed switches, without touching the
+QSS web UI. Verified against two models on two API generations:
+
+| Switch | Address | API | Interfaces |
+|--------|---------|-----|------------|
+| **QSW-M5216-1T** | `192.0.2.10` | **v1** | 16×SFP28 25G (1-16), 1×10G RJ45 (17), LAG 18-25 |
+| **QSW-M3216R-8S8T** | `192.0.2.11` | **v2** | 8×10GBASE-T RJ45 (1-8), 8×SFP28 25G (9-16), LAG 17-24 |
+
+The tool **auto-detects the API version** (via `GET /api/about`) and adapts, so
+the same commands work on both. Port types (SFP vs RJ45) and the LAG offset are
+derived at runtime, not hardcoded.
 
 ## How it works
 
-The QSS web interface is a single-page app that talks to a private but
-undocumented REST API at `/api/v1`. This project drives that same API
-directly. Reconnaissance findings:
+The QSS web interface is a single-page app that talks to a private, undocumented
+REST API. This project drives that same API directly. Reconnaissance findings:
 
 - **Open ports:** HTTP 80, HTTPS 443, SNMP/UDP 161. No SSH/telnet.
-- **Auth:** `POST /api/v1/users/login` with `{"username","password"}` where the
-  password is **standard base64** of the plaintext. Returns a JWT; send it as
-  `Authorization: Bearer <jwt>` on every subsequent call.
-- **Surface:** 126 endpoints — VLANs, ports, LACP/LAG, ACLs, QoS, RSTP, IGMP,
-  SNMP, LLDP, PoE, firmware, system config. See [`API.md`](./API.md).
+- **Version:** `GET /api/about` returns `{"ApiVersion":"v1"|"v2", ...}` — this
+  selects the base path (`/api/v1` or `/api/v2`). Both generations answer it.
+- **Auth (identical on both):** `POST /api/<ver>/users/login` with
+  `{"username","password"}` where the password is **standard base64** of the
+  plaintext. Returns a JWT; send it as `Authorization: Bearer <jwt>`.
+- **Surface:** v1 has 126 endpoints; v2 has 212 (adds L3 routing, 802.1x, ARP
+  inspection, air-gap, IP source guard, PFC, PTP, RADIUS, …). See
+  [`API.md`](./API.md) (v1) and [`API-v2.md`](./API-v2.md) (v2).
 - **VLAN model:** `{"key":"<vlan-id>", "val":[{"Port":"<n>","Tagged":<bool>}]}`.
   Ports in `val` are members (Tagged=true → trunk/tagged, false →
-  access/untagged); ports absent are non-members.
-- **Interfaces:** ports `1-16` = SFP28 25G, `17` = 10GbE RJ45, `18-25` = the 8
-  LAG groups (also VLAN-taggable).
+  access/untagged); ports absent are non-members. **v2 adds a native `name`
+  field** on each VLAN (v1 has none — see `name` labels below).
 - **Persistence:** writes apply immediately to the running config. Run `save`
   (or pass `--save`) to persist running→startup so they survive a reboot.
+
+### v1 vs v2 differences the tool handles for you
+
+- **VLAN edits** use `PUT /vlan` on v1 but `PUT /vlan/align` on v2 (plain
+  `PUT /vlan` 400s there). Create/delete are `/vlan` on both.
+- **Port writes** (`/portlist`): v2 requires `MediaType` capitalized and an
+  `?autosave=true` query, or the write is silently ignored.
+- **Flow-control** is a bool on v1, an `"enable"/"disable"` string on v2.
+- **Known v2 limitations:** the switch accepts port **enable/disable** via
+  `/portlist` but **silently rejects per-port MTU and flow-control**, and
+  **400s on forced speed**. The tool now **reads back after every port write and
+  errors loudly** if the switch didn't apply it (no more silent no-ops). VLAN
+  operations, enable/disable, LAG, and all reads work fully on both.
 
 ## Setup
 
@@ -145,8 +168,10 @@ Notes:
   think about them (`mode: access/trunk`) and reconciled into the switch's
   per-VLAN membership tables for you.
 - `--host` / `--scheme` flags override the target (defaults:
-  `192.0.2.10`, `http`).
-- The JWT is cached under `~/.cache/qsw/` for ~20 min and auto-refreshed on 401.
+  `192.0.2.10`, `http`). Point `--host 192.0.2.11` at the M3216R (v2);
+  the API version is detected automatically.
+- The JWT (and detected API version) is cached under `~/.cache/qsw/` per host
+  for ~20 min and auto-refreshed on 401.
 
 ## Extending
 
@@ -157,7 +182,8 @@ built. The `raw` CLI command already reaches all of them for ad-hoc use.
 
 ## Files
 
-- `qsw.py` — the client library + CLI.
-- `RESEARCH.md` — how the API/auth were reverse-engineered and turned into this tool.
-- `API.md` — full reverse-engineered endpoint map.
+- `qsw.py` — the client library + CLI (auto-detects API v1/v2).
+- `RESEARCH.md` — how the API/auth were reverse-engineered (§10 covers API v2).
+- `API.md` — v1 endpoint map (QSW-M5216-1T, 126 endpoints).
+- `API-v2.md` — v2 endpoint map (QSW-M3216R-8S8T, 212 endpoints).
 - `switch.example.yaml` — annotated declarative config for `apply`.

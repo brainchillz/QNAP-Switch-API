@@ -301,3 +301,48 @@ appliance:
 Every write in this project was tested on link-down ports or throwaway VLAN ids
 and reverted; the switch was returned to its exact original state after each
 test.
+
+---
+
+## 10. The second switch: API v2 (QSW-M3216R-8S8T)
+
+A second switch (`192.0.2.11`, QSW-M3216R-8S8T) turned out to run a **newer
+firmware with an API v2**, discovered the same way: fetch the SPA bundle, read
+it, probe live. The tool was generalized to auto-detect and drive both.
+
+**How v2 was identified.** `POST /api/v1/users/login` returned the SPA HTML, not
+JSON — a tell that `/api/v1` isn't a route on this box. The (Vite/Vue3) bundle
+reads `GET /api/about` → `{"ApiVersion":"v2"}` and sets the base path from it.
+Both generations answer `/api/about`, so the tool uses it to pick `/api/v1` vs
+`/api/v2` per host.
+
+**What carried over unchanged:** base64-password → JWT auth, the
+`{error_code,result}` envelope, and the VLAN `{Port,Tagged}` membership model.
+
+**What differed (all confirmed live, then encoded in the tool):**
+
+1. **VLAN edits move to `PUT /vlan/align`.** Plain `PUT /vlan` returns 400 on
+   v2; create (`POST /vlan`) and delete (`DELETE /vlan`) are unchanged. Found by
+   reading the bundle's vlan store actions.
+2. **VLANs have native names.** `{key, name, val}` — v2 firmware stores VLAN
+   names (v1 doesn't). `/vlan/align` preserves the name whether or not you send
+   it. The tool displays native names and falls back to local labels.
+3. **Port model is derived, not hardcoded.** `/lacp/info StartIndex` is 16 here
+   (17 on v1): physical ports 1-16, LAG 17-24. Port *type* comes from each
+   interface's `MediaType` (`fiber`/`copper`), so the reversed 8T+8S layout
+   (RJ45 1-8, SFP 9-16) labels correctly with no per-model table.
+4. **Port-config writes are pickier — and partly silent.** `PUT /portlist`
+   needs `MediaType` **capitalized** (`Copper`/`Fiber`; reads return lowercase)
+   and an `?autosave=true` query, or the whole record is silently ignored. Even
+   correct, v2 accepts **enable/disable** but **silently drops per-port MTU and
+   flow-control** and **400s on forced speed**. This is gotcha #1 (silent
+   no-op) all over again — so the tool now **reads back after every port write**
+   and raises if the change didn't take, converting silent failure into a clear
+   error. FC is also a string (`enable`/`disable`) on v2 vs a bool on v1.
+
+**Surface:** v2 exposes 212 endpoints (vs 126), including real L3 routing
+(`/ip`, `/arp`), `/dot1x`, ARP inspection, `/airgap`, `/ipsg`, `/radius`,
+`/pfc`, `/ptp`, and `/certificate`. Full map in [`API-v2.md`](./API-v2.md).
+
+The lesson from §7 held throughout v2 too: **a 200 is not proof a write took
+effect.** Read-back caught every one of v2's silent divergences.
