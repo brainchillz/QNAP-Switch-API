@@ -1,16 +1,30 @@
 # NetworkController — QNAP QSW managed-switch programmatic control
 
 Script-driven management of QNAP **QSW** managed switches, without touching the
-QSS web UI. Verified against two models on two API generations:
+QSS web UI. The tool **auto-detects the API version** (via `GET /api/about`) and
+adapts, so the same commands work across models: port types (SFP vs RJ45) and
+the LAG offset are derived at runtime, not hardcoded.
 
-| Switch | Address | API | Interfaces |
-|--------|---------|-----|------------|
-| **QSW-M5216-1T** | `192.0.2.10` | **v1** | 16×SFP28 25G (1-16), 1×10G RJ45 (17), LAG 18-25 |
-| **QSW-M3216R-8S8T** | `192.0.2.11` | **v2** | 8×10GBASE-T RJ45 (1-8), 8×SFP28 25G (9-16), LAG 17-24 |
+## Supported switches
 
-The tool **auto-detects the API version** (via `GET /api/about`) and adapts, so
-the same commands work on both. Port types (SFP vs RJ45) and the LAG offset are
-derived at runtime, not hardcoded.
+**Tested live** (both directions of every command exercised):
+
+| Switch | API | Interfaces |
+|--------|-----|------------|
+| **QSW-M5216-1T** | **v1** | 16×SFP28 25G (1-16), 1×10G RJ45 (17), LAG 18-25 |
+| **QSW-M3216R-8S8T** | **v2** | 8×10GBASE-T RJ45 (1-8), 8×SFP28 25G (9-16), LAG 17-24 |
+
+**Likely compatible but untested** — the v2 firmware bundle is shared across a
+whole family, so these should work via the same auto-detection (report back if
+you try one): `QSW-M3212R-8S4T`, `QSW-M3224(P)-24T`, `QSW-M5218(P)-6F12T`,
+`QSW-M7230(P)-2X4F24T`, `QSW-M7308R-4X`, `QSW-IM3216-8S8T`, and other QSS v1/v2
+`QSW-M*` models. The tool never hardcodes a model — it reads the port layout
+from the switch — so a new model mostly needs the endpoints it exposes to match.
+
+> **v2 caveat:** on v2, per-port MTU, flow-control, and forced speed are not
+> settable through `/portlist` (the switch silently drops them / 400s). The tool
+> reads back after every port write and **errors loudly** rather than reporting a
+> false success. VLANs, enable/disable, LAG, and all reads work fully. See below.
 
 ## How it works
 
