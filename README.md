@@ -1,0 +1,163 @@
+# NetworkController — QNAP QSW-M5216-1T programmatic control
+
+Script-driven management of the QNAP **QSW-M5216-1T** 25GbE managed switch at
+`192.0.2.10`, without touching the QSS web UI.
+
+## How it works
+
+The QSS web interface is a single-page app that talks to a private but
+undocumented REST API at `/api/v1`. This project drives that same API
+directly. Reconnaissance findings:
+
+- **Open ports:** HTTP 80, HTTPS 443, SNMP/UDP 161. No SSH/telnet.
+- **Auth:** `POST /api/v1/users/login` with `{"username","password"}` where the
+  password is **standard base64** of the plaintext. Returns a JWT; send it as
+  `Authorization: Bearer <jwt>` on every subsequent call.
+- **Surface:** 126 endpoints — VLANs, ports, LACP/LAG, ACLs, QoS, RSTP, IGMP,
+  SNMP, LLDP, PoE, firmware, system config. See [`API.md`](./API.md).
+- **VLAN model:** `{"key":"<vlan-id>", "val":[{"Port":"<n>","Tagged":<bool>}]}`.
+  Ports in `val` are members (Tagged=true → trunk/tagged, false →
+  access/untagged); ports absent are non-members.
+- **Interfaces:** ports `1-16` = SFP28 25G, `17` = 10GbE RJ45, `18-25` = the 8
+  LAG groups (also VLAN-taggable).
+- **Persistence:** writes apply immediately to the running config. Run `save`
+  (or pass `--save`) to persist running→startup so they survive a reboot.
+
+## Setup
+
+Needs Python 3 with `requests` (already installed here). Credentials are read
+from `../qnap-creds` by default, or `QSW_USER`/`QSW_PASS` env vars.
+
+```bash
+chmod +x qsw.py
+```
+
+## Usage
+
+```bash
+# Read
+./qsw.py vlans                 # list all VLANs with tagged/untagged ports
+./qsw.py vlan 100              # show one VLAN
+./qsw.py ports                 # port link/speed table
+./qsw.py vlans --json          # raw JSON (works on most read commands)
+
+# Create / modify VLANs
+./qsw.py add 250 --tagged 1-4,17 --untagged 5,6   # create VLAN 250
+./qsw.py set 250 --tagged 1-8                      # REPLACE 250's membership
+./qsw.py del 250 260                               # delete VLAN(s)
+./qsw.py add 250 --tagged 1-4 --save              # create + persist to startup
+
+# Trunk a port across ALL VLANs (full 802.1Q trunk)
+./qsw.py trunk 17                      # port 17 -> tagged member of every VLAN
+./qsw.py trunk 17 --native 1           # ...but VLAN 1 carried untagged (native)
+./qsw.py trunk 20 --dry-run            # preview changes (LAG 3), touch nothing
+./qsw.py trunk 17 --except 30,700      # trunk all VLANs except 30 and 700
+./qsw.py trunk 17 --native 1 --save    # trunk + persist
+
+# Access port: untagged on ONE VLAN, removed from all others (inverse of trunk)
+./qsw.py access 5 300                   # port 5 -> untagged member of VLAN 300 only
+./qsw.py access 5 300 --dry-run         # preview
+./qsw.py access 5 300 --save            # + persist
+
+# MTU (max frame size) — per interface (physical + LAG)
+./qsw.py mtu 17                         # show port 17's MTU
+./qsw.py mtu 1-16                       # show MTU for a range
+./qsw.py mtu 17 1500                    # set port 17 MTU to 1500
+./qsw.py mtu 1-16 9016 --save           # set + persist (9016 = default jumbo)
+
+# VLAN name labels (stored LOCALLY — the switch has no VLAN names)
+./qsw.py name 100 servers               # label VLAN 100 "servers"
+./qsw.py name --list                    # list labels
+./qsw.py vlans                          # labels show in the table
+./qsw.py access 5 servers               # use a label anywhere an id is accepted
+
+# Port control (enable/disable, speed, flow-control)
+./qsw.py port 3                         # show port 3 state
+./qsw.py port 5 --disable               # shut a port down
+./qsw.py port 5 --enable                # bring it back up
+./qsw.py port 17 --speed 10g            # force speed (auto|1g|10g|25g)
+./qsw.py port 3 --flow-control on --save
+
+# Visibility & health
+./qsw.py ports                          # link/speed/MTU table
+./qsw.py neighbors                      # LLDP: what's plugged into each port
+./qsw.py health                         # switch temperature + fan RPM
+./qsw.py macs                           # learned MAC table (MAC / VLAN / port)
+./qsw.py macs --port 3                  # only MACs seen on port 3
+./qsw.py macs --vlan servers            # by VLAN (id or label)
+./qsw.py macs --mac 00:50:56            # by MAC substring (OUI lookup, etc.)
+./qsw.py find a89c6c                    # which port/VLAN is this host on? (any format)
+
+# Link aggregation (bonding)
+./qsw.py lag                            # list all 8 LAG groups
+./qsw.py lag set 1 15,16                # bond ports 15+16 as group 1 (LACP)
+./qsw.py lag set 1 15,16 --mode static  # static (non-LACP) bond
+./qsw.py lag del 1                      # remove group 1
+
+# Declarative config — reconcile the whole switch to a YAML file
+./qsw.py apply switch.yaml --dry-run    # preview the plan, change nothing
+./qsw.py apply switch.yaml              # apply (auto-backs-up first)
+./qsw.py apply switch.yaml --save       # apply + persist to startup
+
+# Config backup / restore
+./qsw.py backup                         # -> qsw-backup-<host>-<timestamp>.bin
+./qsw.py backup myswitch.bin            # to a named file
+./qsw.py restore myswitch.bin --yes     # DESTRUCTIVE: replaces config, reboots
+
+# Escape hatch — hit ANY of the 126 endpoints directly
+./qsw.py raw GET /ports/statistics
+./qsw.py raw PUT /vlan --data '{"data":[{"key":"99","val":[{"Port":"1","Tagged":true}]}]}'
+./qsw.py save                                      # persist running->startup
+```
+
+Notes:
+- `set` replaces the *entire* member list for a VLAN (mirrors the web UI). To
+  tweak, read the VLAN first, adjust, then `set` the full desired list.
+- `trunk` is a read-modify-write across every VLAN (one PUT per VLAN that needs
+  changing; idempotent). This switch has **no native port "trunk mode" or PVID**
+  — membership is a pure 802.1Q table — so a trunk is literally "tagged on all
+  VLANs." Consequence: a VLAN you create *later* won't include the port until
+  you re-run `trunk` (or add the port when creating it). Use `--native <vid>`
+  to leave one VLAN untagged so untagged ingress on the port has a home.
+- `access <port> <vid>` is the inverse of `trunk`: untagged member of exactly
+  one VLAN, removed from every other VLAN. Idempotent; the VLAN must exist.
+- `mtu` is **per-interface** (physical ports 1-17 and LAG groups 18-25), not
+  per-VLAN — MTU isn't a VLAN property on this L2 switch. Default is 9016
+  (jumbo); the switch clamps values above 10000. Not exposed in the QSS web
+  UI at all, but fully settable through the API.
+- `name` labels are **local only** (stored in `vlan-names.json`, path override
+  `QSW_NAMES`). The switch firmware has no VLAN-name field — verified by writing
+  one and watching it get dropped. Labels are accepted anywhere a VLAN id is
+  (e.g. `vlan storage`, `access 5 servers`, `trunk 17 --native mgmt`).
+- `port --speed` writes the switch's forced-speed value (`auto` re-enables
+  autoneg). Speed changes can bounce a live link — use `--dry-run` first.
+- `backup` downloads the full config as a tar blob; `restore` re-uploads it and
+  the switch **reboots**. `restore` refuses to run without `--yes`. Both use
+  endpoints the web UI's System > Backup/Restore page uses.
+- `lag` group N shows up as **interface 17+N** (group 1 = interface 18) in
+  `ports`/`vlans` — give that interface its VLAN role, not the member ports.
+  Members must be ≥2 SFP28 ports (1-16). Bonding **resets the member ports'
+  VLAN config**, so bond first, then assign VLANs to the LAG interface.
+- `apply` reconciles the switch to a declarative `switch.yaml` (see
+  `switch.example.yaml`). It's idempotent, only changes what differs, never
+  deletes VLANs or touches unlisted ports, and **auto-backs-up** before writing
+  (unless `--dry-run` or `--no-backup`). Port roles are expressed the way you
+  think about them (`mode: access/trunk`) and reconciled into the switch's
+  per-VLAN membership tables for you.
+- `--host` / `--scheme` flags override the target (defaults:
+  `192.0.2.10`, `http`).
+- The JWT is cached under `~/.cache/qsw/` for ~20 min and auto-refreshed on 401.
+
+## Extending
+
+`qsw.py` exposes a `QSW` class with a generic `request(method, path, data)`
+method and cached auth. Any endpoint in [`API.md`](./API.md) is a one-liner —
+e.g. add `lacp`, `acl`, or `poe` subcommands the same way the VLAN commands are
+built. The `raw` CLI command already reaches all of them for ad-hoc use.
+
+## Files
+
+- `qsw.py` — the client library + CLI.
+- `RESEARCH.md` — how the API/auth were reverse-engineered and turned into this tool.
+- `API.md` — full reverse-engineered endpoint map.
+- `switch.example.yaml` — annotated declarative config for `apply`.

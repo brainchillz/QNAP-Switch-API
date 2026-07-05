@@ -1,0 +1,12 @@
+# Local-only state / secrets — never commit
+vlan-names.json
+qnap-creds
+token
+*.token
+
+# Config backups produced by `qsw.py backup` / `apply`
+qsw-backup-*.bin
+
+# Python
+__pycache__/
+*.pyc

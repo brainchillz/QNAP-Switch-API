@@ -1,0 +1,59 @@
+# Declarative switch config for `qsw.py apply`.
+#
+#   ./qsw.py apply switch.yaml --dry-run     # preview the plan
+#   ./qsw.py apply switch.yaml               # apply (auto-backs-up first)
+#   ./qsw.py apply switch.yaml --save        # apply + persist to startup
+#
+# apply is a RECONCILER: it computes the difference between this file and the
+# switch's current state and only changes what differs (idempotent — running it
+# twice does nothing the second time). It NEVER deletes VLANs or touches ports
+# you don't list here.
+
+# VLANs that should exist, each with an optional local name label.
+# (The switch firmware has no VLAN names; labels are stored locally and can be
+# used anywhere an id is accepted, including below.)
+vlans:
+  1: mgmt
+  30: storage
+  100: servers
+  200: iot
+
+# Per-port intent. Only ports listed here are reconciled.
+# Ports are 1-16 (SFP28 25G), 17 (10GbE), 18-25 (LAG interfaces).
+ports:
+  # Access port: untagged on ONE VLAN, removed from all others.
+  3:
+    mode: access
+    vlan: servers          # id (100) or label ("servers")
+    mtu: 9016
+
+  5:
+    mode: access
+    vlan: iot
+
+  # Trunk: tagged on the listed VLANs, with an untagged "native" VLAN for
+  # untagged ingress. Use `tagged: all` to carry every declared/existing VLAN.
+  17:
+    mode: trunk
+    native: mgmt           # untagged VLAN on this port
+    tagged: [storage, servers, iot]
+
+  # A LAG interface (group 1 = interface 18) can itself be trunked/accessed.
+  18:
+    mode: trunk
+    native: mgmt
+    tagged: all
+
+  # Port attributes work with or without a VLAN mode:
+  7:
+    enabled: true          # false = shut the port down
+    flow_control: off
+    # speed: auto          # auto | 1g | 10g | 25g  (can bounce a live link)
+
+# Link aggregation groups (1-8). Members must be >=2 SFP28 ports (1-16).
+# NOTE: bonding resets the member ports' VLAN config — give the LAG *interface*
+# (18-25) its VLAN role above, not the individual member ports.
+lags:
+  1:
+    ports: [15, 16]
+    mode: lacp             # lacp (active) or static
